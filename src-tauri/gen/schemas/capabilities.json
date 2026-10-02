@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capabilities for Proxy Dock foundation.","local":true,"windows":["main"],"permissions":["opener:allow-open-url","autostart:allow-enable","autostart:allow-disable","autostart:allow-is-enabled"]}}
