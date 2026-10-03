@@ -417,6 +417,9 @@ impl BridgeError {
     fn terminal(message: impl Into<String>, status: u16) -> Self {
         BridgeError { message: message.into(), status, retryable: false }
     }
+    pub fn retryable(message: impl Into<String>, status: u16) -> Self {
+        BridgeError { message: message.into(), status, retryable: true }
+    }
 }
 
 /// Retryable iff upstream rate-limited us or failed server-side.
@@ -535,11 +538,17 @@ pub fn openai_messages_to_cc(messages: &serde_json::Value) -> (String, Vec<serde
                 if let Some(calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
                     for call in calls {
                         let func = call.get("function").cloned().unwrap_or(serde_json::Value::Null);
+                        // Upstream validates `input[N].arguments`: every tool-call
+                        // part carries `arguments` (JSON string, "{}" minimum)
+                        // alongside the proven flat `input` object.
+                        let input = parse_args(func.get("arguments").or_else(|| call.get("arguments")));
+                        let args_text = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
                         parts.push(serde_json::json!({
                             "type": "tool-call",
                             "toolCallId": call.get("id").and_then(|v| v.as_str()).unwrap_or(""),
                             "toolName": func.get("name").and_then(|v| v.as_str()).or_else(|| call.get("name").and_then(|v| v.as_str())).unwrap_or(""),
-                            "input": parse_args(func.get("arguments").or_else(|| call.get("arguments"))),
+                            "input": input,
+                            "arguments": args_text,
                         }));
                     }
                     // Fill in generated ids where the client omitted them.
@@ -635,11 +644,19 @@ pub fn openai_tools_to_cc(tools: Option<&serde_json::Value>) -> Vec<serde_json::
             _ => tool.clone(),
         };
         let Some(name) = func.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else { continue };
+        // Never emit a bare `{}` schema: missing/non-object/empty parameters
+        // become the valid empty-object schema (mirrors claude.rs).
+        let schema = match func.get("parameters") {
+            Some(serde_json::Value::Object(map)) if !map.is_empty() => {
+                serde_json::Value::Object(map.clone())
+            }
+            _ => serde_json::json!({"type": "object"}),
+        };
         out.push(serde_json::json!({
             "type": "function",
             "name": name,
             "description": func.get("description").and_then(|v| v.as_str()).unwrap_or(""),
-            "input_schema": func.get("parameters").cloned().unwrap_or_else(|| serde_json::json!({})),
+            "input_schema": schema,
         }));
     }
     out
@@ -1533,6 +1550,52 @@ mod tests {
         assert_eq!(payload["params"]["tools"][0]["name"], "f");
         // effort passes through for models without an effort table
         assert!(payload["params"].get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn alpha_payload_never_omits_tool_arguments() {
+        // Gmail-search shape: parameter-less tool (no `parameters`) plus a
+        // history tool-call with empty/omitted `arguments`. Upstream validates
+        // `input[N].arguments`, so both must always be present.
+        let ctx = AlphaContext {
+            working_dir: "/tmp/x".to_string(),
+            date: "2026-09-27".to_string(),
+            environment: "linux-x86_64, proxy-dock".to_string(),
+            client_version: BRIDGE_CC_VERSION.to_string(),
+        };
+        let request = serde_json::json!({
+            "model": "gpt-5.5",
+            "messages": [
+                {"role": "assistant", "content": "x", "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "gmail_search"}},
+                    {"id": "c2", "type": "function", "function": {"name": "get_inbox_id", "arguments": ""}},
+                ]},
+                {"role": "tool", "tool_call_id": "c1", "content": "r1"},
+                {"role": "tool", "tool_call_id": "c2", "content": "r2"},
+                {"role": "user", "content": "go"},
+            ],
+            "tools": [
+                {"type": "function", "function": {"name": "gmail_search", "description": "d"}},
+                {"type": "function", "function": {"name": "get_inbox_id"}},
+            ],
+        });
+        let payload = build_alpha_payload(&request, &ctx, "t");
+        // Zero-arg tools get the valid empty-object schema, never bare {}.
+        for tool in payload["params"]["tools"].as_array().unwrap() {
+            assert_eq!(tool["input_schema"]["type"], "object");
+        }
+        // Every history tool-call carries input + non-empty arguments string.
+        for msg in payload["params"]["messages"].as_array().unwrap() {
+            for part in msg["content"].as_array().cloned().unwrap_or_default() {
+                if part.get("type").and_then(|v| v.as_str()) == Some("tool-call") {
+                    assert!(part.get("input").is_some());
+                    assert!(
+                        part.get("arguments").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false),
+                        "tool-call part lacks arguments: {part}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

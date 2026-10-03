@@ -1390,7 +1390,7 @@ async fn bridge_attempt(
         match cc::open_alpha_stream(&client, secret, &payload, &thread_id, &ctx.working_dir).await {
             Err(err) if err.retryable => Attempt::Next(Some(to_adapter(err))),
             Err(err) => Attempt::Stop(bridge_error_response(&err)),
-            Ok(upstream) => Attempt::Done(bridge_stream_response(state, slug, &cand.id, native_model, echo_model, upstream, permit)),
+            Ok(upstream) => bridge_stream_response(state, slug, &cand.id, native_model, echo_model, upstream, permit).await,
         }
     } else {
         match cc::generate_once(&client, secret, &payload, &thread_id, &ctx.working_dir).await {
@@ -1854,20 +1854,60 @@ pub fn normalize_bound(raw: &str) -> Option<String> {
     None
 }
 
-/// SSE streaming response: forwards translated chunks as they arrive.
-/// Pre-content upstream errors emit as content + finish (never bare-return,
-/// never role-only close); errors after content do the same. Empty results
-/// emit an honest error delta instead of 200-empty.
-fn bridge_stream_response(
+/// Read upstream until the first parsed SSE event. Preamble lines are
+/// drained; remaining bytes stay in `buffer` for the forward task. EOF,
+/// transport errors, preamble overflow, and stalls map to retryable 502s so
+/// the caller rolls/retries instead of hanging on a dead stream.
+async fn peek_first_event(
+    upstream: &mut reqwest::Response,
+    buffer: &mut Vec<u8>,
+) -> Result<cc::CcEvent, cc::BridgeError> {
+    const PEEK_TIMEOUT_SECS: u64 = 180;
+    const PEEK_MAX_BYTES: usize = 1024 * 1024;
+    let mut seen: usize = 0;
+    let read = async {
+        loop {
+            while let Some(pos) = buffer.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = buffer.drain(..=pos).collect();
+                seen += line.len();
+                let text = String::from_utf8_lossy(&line);
+                if let Some(event) = cc::parse_cc_line(&text) {
+                    return Ok(event);
+                }
+                if seen > PEEK_MAX_BYTES {
+                    return Err(cc::BridgeError::retryable("upstream preamble too large", 502));
+                }
+            }
+            match upstream.chunk().await {
+                Ok(Some(bytes)) => buffer.extend_from_slice(&bytes),
+                Ok(None) => {
+                    return Err(cc::BridgeError::retryable("upstream closed before first event", 502));
+                }
+                Err(err) => {
+                    return Err(cc::BridgeError::retryable(format!("upstream read failed: {err}"), 502));
+                }
+            }
+        }
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(PEEK_TIMEOUT_SECS), read).await {
+        Ok(out) => out,
+        Err(_) => Err(cc::BridgeError::retryable("upstream first event timeout", 502)),
+    }
+}
+
+/// SSE streaming response: peeks at the first upstream event BEFORE
+/// committing to 200, so pre-content failures surface as rollable HTTP errors
+/// (the caller retries and the user still gets a response) instead of a dead
+/// stream. Post-content errors emit as content + finish (content delivered).
+async fn bridge_stream_response(
     state: &AppState,
     slug: &str,
     account_id: &str,
     native_model: &str,
     echo_model: &str,
-    upstream: reqwest::Response,
+    mut upstream: reqwest::Response,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
-) -> axum::response::Response {
-    let (tx, rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(SSE_CHANNEL_CAP);
+) -> Attempt {
     let completion_id = cc::new_completion_id();
     let created = cc::unix_now();
     let model = echo_model.to_string();
@@ -1876,20 +1916,48 @@ fn bridge_stream_response(
     let account_o = account_id.to_string();
     let native_o = native_model.to_string();
     let start = std::time::Instant::now();
+    let mut buffer: Vec<u8> = Vec::new();
+    let first = match peek_first_event(&mut upstream, &mut buffer).await {
+        Err(err) if err.retryable => return Attempt::Next(Some(to_adapter(err))),
+        Err(err) => return Attempt::Stop(bridge_error_response(&err)),
+        Ok(event) => event,
+    };
+    if let Some(err) = cc::bridge_inline_error(&first) {
+        return if err.retryable {
+            Attempt::Next(Some(to_adapter(err)))
+        } else {
+            Attempt::Stop(bridge_error_response(&err))
+        };
+    }
+    let mut acc = cc::CompletionResult {
+        finish_reason: "stop".to_string(),
+        usage: cc::map_usage_to_openai(0, 0),
+        ..Default::default()
+    };
+    let mut sse_state = cc::SseState::default();
+    let first_lines = match cc::translate_stream_event(&completion_id, &model, created, &first, &mut sse_state, &mut acc) {
+        Err(err) => {
+            return if err.retryable {
+                Attempt::Next(Some(to_adapter(err)))
+            } else {
+                Attempt::Stop(bridge_error_response(&err))
+            };
+        }
+        Ok(lines) => lines,
+    };
+    let (tx, rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(SSE_CHANNEL_CAP);
     tokio::spawn(async move {
         let _permit = permit;
         if !sse_send(&tx, Event::default().data(cc::sse_role_chunk(&completion_id, &model, created))).await {
             return;
         }
-        let mut acc = cc::CompletionResult {
-            finish_reason: "stop".to_string(),
-            usage: cc::map_usage_to_openai(0, 0),
-            ..Default::default()
-        };
-        let mut sse_state = cc::SseState::default();
         let mut content_started = false;
-        let mut buffer: Vec<u8> = Vec::new();
-        let mut upstream = upstream;
+        for line in first_lines {
+            if !sse_send(&tx, Event::default().data(line)).await {
+                return;
+            }
+            content_started = true;
+        }
         let mut err_snippet: Option<String> = None;
         // Emit finish + DONE, record usage, log completion outcome.
         async fn finish_and_record(
@@ -1981,7 +2049,7 @@ fn bridge_stream_response(
         let latency_ms = start.elapsed().as_millis() as i64;
         finish_and_record(&tx, &pool, &slug_o, &account_o, &native_o, &completion_id, &model, created, &acc, err_snippet, content_started, latency_ms).await;
     });
-    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()).into_response()
+    Attempt::Done(Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()).into_response())
 }
 
 /// Non-streaming OpenAI passthrough: parse upstream JSON, rewrite `model` to

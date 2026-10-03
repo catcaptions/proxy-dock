@@ -37,6 +37,26 @@ Mechanism (proven from caller logs + code):
 Ruled out for this incident: thought-only 200-empty replies (all 418
 commandcode usage rows have `completion_tokens > 0`).
 
+## 1b. Follow-up (2026-10-03): `input.arguments` rejection + dead turns
+
+New symptom, same turn shape: `[upstream error] Missing required parameter:
+'input[24].arguments'` (DB `gateway_events` 633/636, `truncated|200` with
+snippet — the §1 surfacing working as intended). Failing shape: history
+`tool-call` parts carried flat `input:{}` with no `arguments` key (empty,
+omitted, or unparsable model arguments all collapsed to `{}`), and zero-arg
+tools declared `input_schema:{}`. First turn (tools only) succeeded; every
+replay turn with history calls failed validation. The user call: the model's
+bad call is the model's fault — but the turn must not die there.
+- [x] Translation fix: every `tool-call` part emits `arguments` (JSON string,
+  `"{}"` minimum) alongside `input`; missing/non-object/empty `parameters`
+  becomes `{"type":"object"}`. Regression test mirrors the gmail shape.
+- [x] Peek-first streams: `bridge_stream_response` reads the first upstream
+  event before committing to 200 SSE (180s cap, 1MB preamble cap). Pre-content
+  inline/translate errors return rollable `Next`/terminal `Stop` (HTTP 502
+  envelope) so the caller retries and the user still gets a response; the
+  validated first event is translated up front and replayed after the role
+  chunk. Post-content errors keep the emit-as-content path.
+
 Fixes (all done 2026-10-03 — wave 1 + auth slice, 129 cargo tests green):
 - [x] Pre-content upstream errors no longer bare-return. In both
   `if !content_started { return; }` branches, emit the error as a content
