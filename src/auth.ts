@@ -730,7 +730,7 @@ export function buildCodexAuthUrl(state: string, challenge: string, redirectUri:
   return `${CODEX_AUTH_URL}?${params.toString()}`;
 }
 
-export function buildAntigravityAuthUrl(state: string, redirectUri: string, clientId: string = ANTIGRAVITY_CLIENT_ID): string {
+export function buildAntigravityAuthUrl(state: string, redirectUri: string, clientId: string = ANTIGRAVITY_CLIENT_ID, challenge?: string): string {
   const params = new URLSearchParams({
     access_type: "offline",
     client_id: clientId,
@@ -740,6 +740,11 @@ export function buildAntigravityAuthUrl(state: string, redirectUri: string, clie
     scope: ANTIGRAVITY_SCOPES,
     state,
   });
+  // PKCE: public clients exchange without any secret (one-click sign-in).
+  if (challenge) {
+    params.set("code_challenge", challenge);
+    params.set("code_challenge_method", "S256");
+  }
   return `${ANTIGRAVITY_AUTH_URL}?${params.toString()}`;
 }
 
@@ -977,7 +982,11 @@ async function exchangeAntigravityCode(code: string): Promise<OAuthCredential> {
     resp = await fetch(ANTIGRAVITY_TOKEN_PATH, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code, redirect_uri: flow.redirectUri ?? ANTIGRAVITY_CALLBACK_URL }),
+      body: JSON.stringify({
+        code,
+        redirect_uri: flow.redirectUri ?? ANTIGRAVITY_CALLBACK_URL,
+        code_verifier: flow.verifier,
+      }),
     });
   } catch {
     throw new Error("Could not reach the token endpoint — is the dev server running? Try again.");
@@ -1115,16 +1124,20 @@ export async function startPreviewOAuth(slug: "chatgpt" | "antigravity" | "claud
     return { state, authUrl, auto: false };
   }
   if (status.antigravityPort > 0) {
+    const { verifier, challenge } = await pkcePair();
     const redirectUri = `http://localhost:${status.antigravityPort}${ANTIGRAVITY_CALLBACK_PATH}`;
-    saveOAuthFlow(slug, { state, redirectUri });
-    const authUrl = buildAntigravityAuthUrl(state, redirectUri, await effectiveAntigravityClientId());
+    saveOAuthFlow(slug, { state, verifier, redirectUri });
+    const authUrl = buildAntigravityAuthUrl(state, redirectUri, await effectiveAntigravityClientId(), challenge);
     void openExternal(authUrl);
     return { state, authUrl, auto: true };
   }
-  saveOAuthFlow(slug, { state, redirectUri: ANTIGRAVITY_CALLBACK_URL });
-  const authUrl = buildAntigravityAuthUrl(state, ANTIGRAVITY_CALLBACK_URL, await effectiveAntigravityClientId());
-  void openExternal(authUrl);
-  return { state, authUrl, auto: false };
+  {
+    const { verifier, challenge } = await pkcePair();
+    saveOAuthFlow(slug, { state, verifier, redirectUri: ANTIGRAVITY_CALLBACK_URL });
+    const authUrl = buildAntigravityAuthUrl(state, ANTIGRAVITY_CALLBACK_URL, await effectiveAntigravityClientId(), challenge);
+    void openExternal(authUrl);
+    return { state, authUrl, auto: false };
+  }
 }
 
 /** Effective Antigravity client ID for the preview flow (dev middleware env,

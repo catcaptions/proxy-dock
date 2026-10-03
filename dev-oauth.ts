@@ -29,13 +29,15 @@ function antigravityClientId(): string {
     process.env.PROXYDOCK_ANTIGRAVITY_CLIENT_ID ?? process.env.PROXYHUB_ANTIGRAVITY_CLIENT_ID ?? "";
   return raw.trim() || ANTIGRAVITY_CLIENT_ID;
 }
-// No shipped default — set PROXYDOCK_ANTIGRAVITY_SECRET (dev) or paste it in
-// Settings (desktop vault). Endpoints below 500 tersely when it is absent.
-function antigravityClientSecret(): string | null {
+// Installed application, not treated as a secret: identifies the app, cannot
+// spend credits (tokens are per-user). Compiled-in default; env override wins.
+const ANTIGRAVITY_CLIENT_SECRET_DEFAULT = "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";
+// User override via PROXYDOCK_ANTIGRAVITY_SECRET, else the compiled default.
+function antigravityClientSecret(): string {
   const raw =
     process.env.PROXYDOCK_ANTIGRAVITY_SECRET ?? process.env.PROXYHUB_ANTIGRAVITY_SECRET ?? "";
   const trimmed = raw.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  return trimmed || ANTIGRAVITY_CLIENT_SECRET_DEFAULT;
 }
 // Claude subscription OAuth — same endpoints the Tauri backend uses
 // (mirrors CLIProxyAPI's internal/auth/claude, nothing invented).
@@ -254,26 +256,31 @@ export function proxyDockDevOAuth(): Plugin {
         // --- Antigravity code exchange: secret stays server-side here.
         if (url.pathname === "/__proxydock/antigravity-exchange" && req.method === "POST") {
           try {
-            const body = (await readJson(req)) as { code?: string; redirect_uri?: string };
+            const body = (await readJson(req)) as { code?: string; redirect_uri?: string; code_verifier?: string };
             if (!body.code || !body.redirect_uri) {
               sendJson(res, 400, { ok: false, error: "missing code or redirect_uri" });
               return;
             }
             const exchangeSecret = antigravityClientSecret();
-            if (!exchangeSecret) {
-              sendJson(res, 500, { ok: false, error: "Antigravity OAuth needs PROXYDOCK_ANTIGRAVITY_SECRET" });
+            // PKCE-first: proceed with the verifier alone when no secret is
+            // configured (public clients need none); include the secret only
+            // when the user set one. At least one must be present.
+            if (!exchangeSecret && !body.code_verifier) {
+              sendJson(res, 500, { ok: false, error: "Antigravity OAuth needs PROXYDOCK_ANTIGRAVITY_SECRET or a PKCE verifier" });
               return;
             }
+            const exchangeParams: Record<string, string> = {
+              code: body.code,
+              client_id: antigravityClientId(),
+              redirect_uri: body.redirect_uri,
+              grant_type: "authorization_code",
+            };
+            if (exchangeSecret) exchangeParams.client_secret = exchangeSecret;
+            if (body.code_verifier) exchangeParams.code_verifier = body.code_verifier;
             const upstream = await fetch(GOOGLE_TOKEN_URL, {
               method: "POST",
               headers: { "Content-Type": "application/x-www-form-urlencoded" },
-              body: new URLSearchParams({
-                code: body.code,
-                client_id: antigravityClientId(),
-                client_secret: exchangeSecret,
-                redirect_uri: body.redirect_uri,
-                grant_type: "authorization_code",
-              }),
+              body: new URLSearchParams(exchangeParams),
             });
             const tokens = (await upstream.json().catch(() => ({}))) as {
               access_token?: string;
@@ -535,19 +542,18 @@ export function proxyDockDevOAuth(): Plugin {
               return;
             }
             const refreshSecret = antigravityClientSecret();
-            if (!refreshSecret) {
-              sendJson(res, 500, { ok: false, error: "Antigravity OAuth needs PROXYDOCK_ANTIGRAVITY_SECRET" });
-              return;
-            }
+            // Refresh grants need no verifier; public clients refresh without
+            // a secret too — include it only when the user configured one.
+            const refreshParams: Record<string, string> = {
+              refresh_token: body.refresh_token,
+              client_id: antigravityClientId(),
+              grant_type: "refresh_token",
+            };
+            if (refreshSecret) refreshParams.client_secret = refreshSecret;
             const upstream = await fetch(GOOGLE_TOKEN_URL, {
               method: "POST",
               headers: { "Content-Type": "application/x-www-form-urlencoded" },
-              body: new URLSearchParams({
-                refresh_token: body.refresh_token,
-                client_id: antigravityClientId(),
-                client_secret: refreshSecret,
-                grant_type: "refresh_token",
-              }),
+              body: new URLSearchParams(refreshParams),
             });
             const data = (await upstream.json().catch(() => ({}))) as Record<string, unknown>;
             sendJson(res, upstream.status, data);

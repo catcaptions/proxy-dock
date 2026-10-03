@@ -664,21 +664,21 @@ pub fn gemini_to_chat_completion(body: &serde_json::Value, completion_id: &str, 
 }
 
 /// Refresh the Google access token (mirrors `quota::refresh_google_token`).
-/// The client secret comes from oauth_secret (vault/env) — never hardcoded.
+/// The client secret is the effective value (compiled default at minimum).
 pub async fn refresh_access_token(refresh_token: &str) -> Result<(String, Option<String>), String> {
     const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-    // Effective user-owned client (vault/env). The agy CLI flow default ID
-    // lives in oauth_secret::BUILTIN_CLIENT_ID; never hardcode one here.
-    let oauth = crate::oauth_secret::read()?;
+    let (client_id, secret) = crate::oauth_secret::read_optional();
+    let secret = secret.unwrap_or_else(|| crate::oauth_secret::COMPILED_DEFAULT_SECRET.to_string());
+    let form = vec![
+        ("refresh_token", refresh_token.to_string()),
+        ("client_id", client_id),
+        ("grant_type", "refresh_token".to_string()),
+        ("client_secret", secret),
+    ];
     let client = serving_client();
     let resp = client
         .post(TOKEN_URL)
-        .form(&[
-            ("refresh_token", refresh_token),
-            ("client_id", oauth.client_id.as_str()),
-            ("client_secret", oauth.client_secret.as_str()),
-            ("grant_type", "refresh_token"),
-        ])
+        .form(&form)
         .send()
         .await
         .map_err(|err| format!("google token refresh failed: {err}"))?;

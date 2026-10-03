@@ -345,7 +345,7 @@ function AntigravitySecretField() {
   if (!isTauri()) {
     return (
       <p className="muted settings-hint settings-hint-first">
-        Set PROXYDOCK_ANTIGRAVITY_SECRET for the dev server.
+        One-click sign-in needs nothing — override via PROXYDOCK_ANTIGRAVITY_SECRET only if Google demands it.
       </p>
     );
   }
@@ -381,7 +381,7 @@ function AntigravitySecretField() {
         </p>
       ) : (
         <p className="muted settings-hint settings-hint-first">
-          Needed for Antigravity sign-in. Register a Google OAuth Desktop client, paste both once.
+          One-click needs nothing — override only if Google demands your own client.
         </p>
       )}
       <input

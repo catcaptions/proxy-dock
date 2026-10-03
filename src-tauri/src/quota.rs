@@ -699,15 +699,18 @@ pub(crate) struct GoogleTokenResponse {
 /// Google OAuth refresh, shared with the catalog module so a stale access
 /// token doesn't fail a catalog refresh the quota path would have saved.
 pub(crate) async fn refresh_google_token(refresh_token: &str) -> Result<GoogleTokenResponse, String> {
-    let oauth = crate::oauth_secret::read()?;
+    // Effective secret (compiled default at minimum) goes on every refresh.
+    let (client_id, secret) = crate::oauth_secret::read_optional();
+    let secret = secret.unwrap_or_else(|| crate::oauth_secret::COMPILED_DEFAULT_SECRET.to_string());
+    let form = vec![
+        ("refresh_token", refresh_token.to_string()),
+        ("client_id", client_id),
+        ("grant_type", "refresh_token".to_string()),
+        ("client_secret", secret),
+    ];
     let resp = client()
         .post(ANTIGRAVITY_TOKEN_URL)
-        .form(&[
-            ("refresh_token", refresh_token),
-            ("client_id", oauth.client_id.as_str()),
-            ("client_secret", oauth.client_secret.as_str()),
-            ("grant_type", "refresh_token"),
-        ])
+        .form(&form)
         .send()
         .await
         .map_err(|err| format!("google token refresh failed: {err}"))?;

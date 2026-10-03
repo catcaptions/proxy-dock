@@ -264,6 +264,8 @@ pub async fn start_antigravity_sign_in(
     pool: tauri::State<'_, SqlitePool>,
 ) -> Result<SignInStarted, String> {
     let _signin = claim_signin_slot("antigravity")?;
+    // PKCE: public clients exchange without any secret (one-click sign-in).
+    let pkce = crate::oauth::pkce();
     let state = crate::oauth::random_state();
     let (server, receiver) = crate::oauth::CallbackServer::new(
         crate::oauth::ANTIGRAVITY_CALLBACK_PORT,
@@ -271,10 +273,10 @@ pub async fn start_antigravity_sign_in(
         state.clone(),
     );
     let port = server.run().await?;
-    open_browser(&app, &crate::oauth::antigravity_auth_url(&state, port))?;
+    open_browser(&app, &crate::oauth::antigravity_auth_url(&state, &pkce, port))?;
     let outcome = wait_for_callback(receiver, "antigravity", "default", &state).await;
     let result = outcome?;
-    let credential = crate::oauth::exchange_antigravity(&result.code, port).await?;
+    let credential = crate::oauth::exchange_antigravity(&result.code, port, &pkce.verifier).await?;
     let account = account_id_for(&credential.email, &credential.access_token);
     store_credential("antigravity", &account, &credential)?;
     let _ = crate::db::register_account(&pool, "antigravity", &account, &credential.email, None).await;
@@ -529,7 +531,7 @@ mod tests {
     fn authorize_urls_keep_all_query_params() {
         for url in [
             crate::oauth::codex_auth_url("s", &crate::oauth::pkce(), 1455),
-            crate::oauth::antigravity_auth_url("s", 51121),
+            crate::oauth::antigravity_auth_url("s", &crate::oauth::pkce(), 51121),
             crate::oauth::claude_auth_url("s", &crate::oauth::pkce(), 54545),
         ] {
             assert!(url.contains("response_type=code"), "truncated URL: {url}");

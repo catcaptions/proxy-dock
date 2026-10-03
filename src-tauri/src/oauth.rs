@@ -127,13 +127,16 @@ pub fn codex_auth_url(state: &str, pkce: &Pkce, port: u16) -> String {
     format!("{CODEX_AUTH_URL}?{}", params.finish())
 }
 
-pub fn antigravity_auth_url(state: &str, port: u16) -> String {
+pub fn antigravity_auth_url(state: &str, pkce: &Pkce, port: u16) -> String {
     let redirect = format!("http://localhost:{port}{ANTIGRAVITY_CALLBACK_PATH}");
     let mut params = url::form_urlencoded::Serializer::new(String::new());
     params.append_pair("access_type", "offline");
     // Effective (user-owned) client: the code must belong to the same
-    // client the exchange uses, or Google rejects it.
+    // client the exchange uses, or Google rejects it. PKCE challenge added
+    // so public clients exchange without any secret (one-click sign-in).
     params.append_pair("client_id", &crate::oauth_secret::client_id());
+    params.append_pair("code_challenge", &pkce.challenge);
+    params.append_pair("code_challenge_method", "S256");
     params.append_pair("prompt", "consent");
     params.append_pair("redirect_uri", &redirect);
     params.append_pair("response_type", "code");
@@ -554,16 +557,37 @@ pub async fn exchange_codex(code: &str, verifier: &str, port: u16) -> Result<Sto
     })
 }
 
-pub async fn exchange_antigravity(code: &str, port: u16) -> Result<StoredCredential, String> {
-    let redirect = format!("http://localhost:{port}{ANTIGRAVITY_CALLBACK_PATH}");
-    let oauth = crate::oauth_secret::read()?;
-    let params = [
-        ("code", code.to_string()),
-        ("client_id", oauth.client_id),
-        ("client_secret", oauth.client_secret),
-        ("redirect_uri", redirect),
-        ("grant_type", "authorization_code".to_string()),
+/// Token-exchange form fields (pure, tested). `code_verifier` (PKCE) and
+/// `client_secret` go together: secret is the effective value (compiled
+/// default at minimum), so both params are present either way Google
+/// validates. Blank secrets are dropped as a safety net.
+pub fn antigravity_exchange_params(
+    code: &str,
+    redirect: &str,
+    client_id: &str,
+    secret: Option<&str>,
+    verifier: &str,
+) -> Vec<(String, String)> {
+    let mut params = vec![
+        ("code".to_string(), code.to_string()),
+        ("client_id".to_string(), client_id.to_string()),
+        ("code_verifier".to_string(), verifier.to_string()),
+        ("redirect_uri".to_string(), redirect.to_string()),
+        ("grant_type".to_string(), "authorization_code".to_string()),
     ];
+    if let Some(secret) = secret.filter(|s| !s.trim().is_empty()) {
+        params.push(("client_secret".to_string(), secret.to_string()));
+    }
+    params
+}
+
+pub async fn exchange_antigravity(code: &str, port: u16, verifier: &str) -> Result<StoredCredential, String> {
+    let redirect = format!("http://localhost:{port}{ANTIGRAVITY_CALLBACK_PATH}");
+    // Effective secret (compiled default at minimum): verifier + secret go
+    // together on every exchange.
+    let (client_id, secret) = crate::oauth_secret::read_optional();
+    let secret = secret.unwrap_or_else(|| crate::oauth_secret::COMPILED_DEFAULT_SECRET.to_string());
+    let params = antigravity_exchange_params(code, &redirect, &client_id, Some(secret.as_str()), verifier);
     let resp = client()
         .post(ANTIGRAVITY_TOKEN_URL)
         .form(&params)
@@ -929,10 +953,26 @@ mod tests {
 
     #[test]
     fn antigravity_auth_url_has_google_endpoints() {
-        let url = antigravity_auth_url("s456", ANTIGRAVITY_CALLBACK_PORT);
+        let pkce = Pkce { verifier: "v".to_string(), challenge: "c".to_string() };
+        let url = antigravity_auth_url("s456", &pkce, ANTIGRAVITY_CALLBACK_PORT);
         assert!(url.starts_with(ANTIGRAVITY_AUTH_URL));
         assert!(url.contains("state=s456"));
         assert!(url.contains("oauth-callback"));
+        assert!(url.contains("code_challenge=c"));
+        assert!(url.contains("code_challenge_method=S256"));
+    }
+
+    #[test]
+    fn antigravity_exchange_params_send_verifier_and_secret() {
+        // Effective secret (compiled default at minimum) rides with the PKCE
+        // verifier on every exchange.
+        let with = antigravity_exchange_params("code", "http://localhost:1/cb", "cid", Some("s"), "ver");
+        assert!(with.iter().any(|(k, v)| k == "code_verifier" && v == "ver"));
+        assert!(with.iter().any(|(k, v)| k == "client_secret" && v == "s"));
+        // Blank stays dropped (safety net; callers fall back to the default).
+        let blank = antigravity_exchange_params("code", "http://localhost:1/cb", "cid", Some("  "), "ver");
+        assert!(blank.iter().any(|(k, v)| k == "code_verifier" && v == "ver"));
+        assert!(blank.iter().all(|(k, _)| k != "client_secret"));
     }
 
     #[test]

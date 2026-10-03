@@ -37,6 +37,20 @@ Mechanism (proven from caller logs + code):
 Ruled out for this incident: thought-only 200-empty replies (all 418
 commandcode usage rows have `completion_tokens > 0`).
 
+## 1c. Follow-up: one-click Antigravity sign-in via PKCE (2026-10-03)
+
+Requiring a user-owned OAuth client was rejected (too complex). Antigravity
+now uses PKCE like the Claude/Codex flows: challenge in the authorize URL,
+verifier at exchange/refresh, `client_secret` sent only when the user
+configured one. Normal sign-in is click → browser → approve → done, no
+console, no pasting. The Settings ID/secret fields stay as fallback for the
+day Google demands a secret. Desktop + preview flows both converted, with
+ params-builder unit tests.
+Outcome 2026-10-03: secret restored as compiled-in default (CLIProxyAPI
+internal/auth/antigravity hardcodes the same value; gemini-cli ships theirs as
+"installed application, not treated as a secret"); PKCE params kept as harmless
+pass-through; env/vault user override still wins. One-click needs no console, no paste.
+
 ## 1b. Follow-up (2026-10-03): `input.arguments` rejection + dead turns
 
 New symptom, same turn shape: `[upstream error] Missing required parameter:

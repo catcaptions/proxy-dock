@@ -1,15 +1,13 @@
 //! Antigravity OAuth client store: vault-backed app setting with env
-//! overrides. There is deliberately NO shipped secret — a committed fallback
-//! briefly existed and was purged before v0.1.0; never re-add one.
+//! overrides plus a compiled-in default.
 //!
-//! The client is user-owned: whoever runs the app registers their own Google
-//! OAuth "Desktop app" client and pastes the ID + secret once in Settings
-//! (or env). Reads: env wins, else the vault bundle, else the built-in
-//! public client ID with NO secret (exchange then fails with a pointer to
-//! Settings). The desktop exchange/refresh and the adapter refresh all read
-//! through here; the dev-only vite middleware (`dev-oauth.ts`) reads the
-//! same env names directly. Never logged, never SQLite, never in error
-//! bodies.
+//! Priority: env override wins, else the vault bundle/bare value, else the
+//! compiled default below. Reads always yield a usable secret (one-click
+//! sign-in); `has_stored` reports user-configured only (env or vault) for
+//! Settings display. The desktop exchange/refresh and the adapter refresh
+//! all read through here; the dev-only vite middleware (`dev-oauth.ts`)
+//! reads the same env names directly. Never logged, never SQLite, never in
+//! error bodies.
 
 /// OS vault service (same as provider credentials and the gateway key).
 const SERVICE: &str = "ai.proxydock";
@@ -26,9 +24,19 @@ pub const ENV_CLIENT_ID: &str = "PROXYDOCK_ANTIGRAVITY_CLIENT_ID";
 const LEGACY_ENV_CLIENT_ID: &str = "PROXYHUB_ANTIGRAVITY_CLIENT_ID";
 
 /// Built-in public client ID (agy CLI flow). Usable for the authorize URL;
-/// token calls additionally need the user-owned secret below.
+/// token calls additionally need the secret below (compiled default at
+/// minimum, user override when configured).
 pub const BUILTIN_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+
+/// Compiled-in default client secret for the built-in client above.
+/// Installed-application client (cf. gemini-cli: "It's ok to save this in
+/// git because this is an installed application ... the client secret is
+/// obviously not treated as a secret"). Public in CLIProxyAPI
+/// `internal/auth/antigravity` listings (pkg.go.dev, all versions). It only
+/// identifies the app; tokens are per-user and it cannot spend anyone's
+/// credits or quota. Env/vault overrides win when set; never log the value.
+pub const COMPILED_DEFAULT_SECRET: &str = "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";
 
 /// User-owned OAuth client: ID + secret.
 pub struct OAuthClient {
@@ -104,47 +112,77 @@ fn vault_set(secret: &str) -> Result<(), String> {
     }
 }
 
-/// Effective client: env wins, else the vault bundle, else the built-in
-/// public ID with NO secret (token calls then fail with a pointer below).
-/// `Err` carries a terse pointer, never the value. Legacy slot values that
-/// are a bare secret (pre-bundle era) are honored as secret-only.
-pub fn read() -> Result<OAuthClient, String> {
-    let client_secret = match env_override() {
-        Some(from_env) => from_env,
-        None => match vault_get() {
-            Ok(stored) => {
-                if let Ok(bundle) = serde_json::from_str::<serde_json::Value>(&stored) {
-                    match bundle.get("client_secret").and_then(|v| v.as_str()) {
-                        Some(secret) if !secret.trim().is_empty() => secret.trim().to_string(),
-                        _ => {
-                            return Err(format!(
-                                "Antigravity OAuth needs its client secret — paste your OAuth client in Settings or set {ENV_OVERRIDE}"
-                            ))
-                        }
-                    }
-                } else if !stored.trim().is_empty() {
-                    // Legacy bare-secret slot value: keep working.
-                    stored.trim().to_string()
-                } else {
-                    return Err(format!(
-                        "Antigravity OAuth needs its client secret — paste your OAuth client in Settings or set {ENV_OVERRIDE}"
-                    ));
-                }
-            }
-            Err(_) => {
-                return Err(format!(
-                    "Antigravity OAuth needs its client secret — paste your OAuth client in Settings or set {ENV_OVERRIDE}"
-                ))
-            }
-        },
-    };
-    Ok(OAuthClient { client_id: client_id(), client_secret })
+/// Parse a vault slot value: JSON bundle (`{"client_id","client_secret"}`)
+/// wins; a non-JSON value is a legacy bare secret. Trims; blank counts as
+/// unset. A JSON value without a usable secret is unset (never the raw JSON).
+fn vault_secret_from_stored(stored: &str) -> Option<String> {
+    let trimmed = stored.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(bundle) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return bundle
+            .get("client_secret")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
+    Some(trimmed.to_string())
 }
 
-/// Presence only (for Settings UI): a usable secret exists. Never returns
-/// the value.
+/// Resolve the effective secret from already-read inputs: env wins, else
+/// vault bundle/bare value, else the compiled default. Pure (tested).
+fn effective_secret(env: Option<String>, vault_stored: Option<String>) -> String {
+    if let Some(from_env) = env {
+        let trimmed = from_env.trim().to_string();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+    if let Some(stored) = vault_stored.as_deref() {
+        if let Some(secret) = vault_secret_from_stored(stored) {
+            return secret;
+        }
+    }
+    COMPILED_DEFAULT_SECRET.to_string()
+}
+
+/// User-configured secret only (env or vault). None when the caller would
+/// fall back to the compiled default. Never logs the value.
+fn user_secret() -> Option<String> {
+    if let Some(from_env) = env_override() {
+        return Some(from_env);
+    }
+    vault_get().ok().and_then(|stored| vault_secret_from_stored(&stored))
+}
+
+/// Effective client: ID falls back through env → vault bundle → built-in;
+/// secret is always `Some` (env → vault bundle/bare → compiled default).
+/// Callers send `code_verifier` (PKCE) and `client_secret` together.
+pub fn read_optional() -> (String, Option<String>) {
+    let id = client_id();
+    let secret = effective_secret(env_override(), vault_get().ok());
+    (id, Some(secret))
+}
+
+/// Effective client with a secret. Never `Err` for a missing secret (the
+/// compiled default applies); `Err` carries a terse pointer, never the
+/// value. Legacy slot values that are a bare secret (pre-bundle era) are
+/// honored as secret-only.
+pub fn read() -> Result<OAuthClient, String> {
+    let (client_id, secret) = read_optional();
+    match secret {
+        Some(client_secret) => Ok(OAuthClient { client_id, client_secret }),
+        None => Err(format!(
+            "Antigravity sign-in unavailable — set {ENV_OVERRIDE} or paste a client in Settings"
+        )),
+    }
+}
+
+/// Presence only (for Settings UI): a user-configured secret exists (env or
+/// vault). The compiled default does NOT count. Never returns the value.
 pub fn has_stored() -> bool {
-    read().is_ok()
+    user_secret().is_some()
 }
 
 /// User-set override of the stored OAuth client (ID + secret bundle).
@@ -183,20 +221,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_secret_points_at_settings() {
-        // Env must be absent for the Err branch; a machine with a stored
-        // secret takes the Ok branch instead — both are asserted, so this
-        // never fails loudly on dev machines nor passes silently in CI.
+    fn default_fallback_when_unconfigured() {
+        // Env wins in production; skip the live read when it is set so this
+        // stays deterministic on dev machines and CI alike.
         if env_override().is_some() {
             return;
         }
-        match read() {
-            Ok(_) => assert!(has_stored()),
-            Err(err) => {
-                // Names the fix (env var) without echoing any secret material.
-                assert!(err.contains(ENV_OVERRIDE), "error names the fix: {err}");
-                assert!(err.len() < 128, "error stays terse: {err}");
-            }
+        // Pure precedence: env > vault bundle/bare > compiled default.
+        assert_eq!(effective_secret(Some(" env-s ".to_string()), Some("vault-s".to_string())), "env-s");
+        assert_eq!(effective_secret(Some("  ".to_string()), Some("vault-s".to_string())), "vault-s");
+        assert_eq!(effective_secret(None, None), COMPILED_DEFAULT_SECRET);
+        // Live read never Errs for a missing secret; unconfigured machines
+        // get exactly the compiled default.
+        let client = read().expect("read falls back to default");
+        assert!(!client.client_secret.trim().is_empty());
+        let (_, opt) = read_optional();
+        assert!(opt.as_deref().is_some_and(|s| !s.trim().is_empty()));
+        if !has_stored() {
+            assert_eq!(client.client_secret, COMPILED_DEFAULT_SECRET);
+            assert_eq!(opt.as_deref(), Some(COMPILED_DEFAULT_SECRET));
+        }
+    }
+
+    #[test]
+    fn bundle_and_bare_values_parse() {
+        let bundle = serde_json::json!({"client_id": "cid", "client_secret": "  s3cr3t  "}).to_string();
+        assert_eq!(vault_secret_from_stored(&bundle).as_deref(), Some("s3cr3t"));
+        assert_eq!(vault_secret_from_stored("  raw-bare-secret  ").as_deref(), Some("raw-bare-secret"));
+        assert_eq!(effective_secret(None, Some(bundle.clone())), "s3cr3t");
+        assert_eq!(effective_secret(None, Some("raw-bare-secret".to_string())), "raw-bare-secret");
+        // Unusable slot values fall through to the compiled default.
+        assert!(vault_secret_from_stored("").is_none());
+        assert!(vault_secret_from_stored("   ").is_none());
+        assert!(vault_secret_from_stored(&serde_json::json!({"client_id": "cid"}).to_string()).is_none());
+        assert!(vault_secret_from_stored(&serde_json::json!({"client_secret": "  "}).to_string()).is_none());
+        assert_eq!(effective_secret(None, Some("   ".to_string())), COMPILED_DEFAULT_SECRET);
+    }
+
+    #[test]
+    fn errors_never_echo_secrets() {
+        // Validation errors (no vault write) must not echo what was typed.
+        let probe = "probe-secret-xyz-123";
+        let err = set_override("", probe).unwrap_err();
+        assert!(!err.contains(probe), "error echoes secret");
+        assert!(!err.contains(COMPILED_DEFAULT_SECRET), "error echoes default");
+        assert!(err.len() < 128, "error stays terse: {err}");
+        // The unreachable missing-secret branch stays terse and secret-free.
+        if let Err(err) = read() {
+            assert!(!err.contains(COMPILED_DEFAULT_SECRET));
+            assert!(err.len() < 128, "error stays terse: {err}");
         }
     }
 }
