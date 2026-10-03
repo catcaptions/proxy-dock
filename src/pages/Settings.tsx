@@ -312,12 +312,15 @@ async function invokeDesktop(cmd: string, args: Record<string, unknown> = {}): P
 /** Desktop-only card (never rendered in browser preview): close behavior,
  * launch-on-login, and tray actions. Close defaults to tray. */
 /**
- * Antigravity OAuth client secret: presence-only (the value is never shown).
- * Desktop stores it in the vault; browser preview needs
- * PROXYDOCK_ANTIGRAVITY_SECRET on the dev server instead.
+ * Antigravity OAuth client (user-owned ID + secret): presence-only (values
+ * are never shown). Desktop stores the bundle in the vault; browser preview
+ * needs PROXYDOCK_ANTIGRAVITY_SECRET (+PROXYDOCK_ANTIGRAVITY_CLIENT_ID) on
+ * the dev server instead. Register a Google OAuth "Desktop app" client and
+ * paste both values once.
  */
 function AntigravitySecretField() {
   const [present, setPresent] = useState<boolean | null>(null);
+  const [clientId, setClientId] = useState("");
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -348,15 +351,17 @@ function AntigravitySecretField() {
   }
 
   const save = () => {
+    const id = clientId.trim();
     const secret = draft.trim();
-    if (!secret) return;
+    if (!id || !secret) return;
     setError(null);
     setNotice(null);
     setBusy(true);
     void (async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("set_antigravity_secret", { secret });
+        await invoke("set_antigravity_secret", { clientId: id, secret });
+        setClientId("");
         setDraft("");
         setPresent(true);
         setNotice("Saved.");
@@ -376,9 +381,20 @@ function AntigravitySecretField() {
         </p>
       ) : (
         <p className="muted settings-hint settings-hint-first">
-          Needed for Antigravity sign-in. Paste once, stored in the vault.
+          Needed for Antigravity sign-in. Register a Google OAuth Desktop client, paste both once.
         </p>
       )}
+      <input
+        id="antigravity-client-id"
+        type="text"
+        autoComplete="off"
+        value={clientId}
+        maxLength={128}
+        disabled={busy}
+        placeholder="Client ID"
+        aria-label="Antigravity OAuth client ID"
+        onChange={(e) => setClientId(e.target.value)}
+      />
       <input
         id="antigravity-secret"
         type="password"
@@ -392,7 +408,7 @@ function AntigravitySecretField() {
           if (e.key === "Enter") save();
         }}
       />
-      <button type="button" disabled={busy || !draft.trim()} onClick={save}>
+      <button type="button" disabled={busy || !clientId.trim() || !draft.trim()} onClick={save}>
         Save
       </button>
       {notice ? <p className="muted">{notice}</p> : null}

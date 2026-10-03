@@ -238,6 +238,7 @@ pub async fn start_codex_sign_in(
     app: tauri::AppHandle<tauri::Wry>,
     pool: tauri::State<'_, SqlitePool>,
 ) -> Result<SignInStarted, String> {
+    let _signin = claim_signin_slot("chatgpt")?;
     let pkce = crate::oauth::pkce();
     let state = crate::oauth::random_state();
     let (server, receiver) = crate::oauth::CallbackServer::new(
@@ -262,6 +263,7 @@ pub async fn start_antigravity_sign_in(
     app: tauri::AppHandle<tauri::Wry>,
     pool: tauri::State<'_, SqlitePool>,
 ) -> Result<SignInStarted, String> {
+    let _signin = claim_signin_slot("antigravity")?;
     let state = crate::oauth::random_state();
     let (server, receiver) = crate::oauth::CallbackServer::new(
         crate::oauth::ANTIGRAVITY_CALLBACK_PORT,
@@ -286,6 +288,7 @@ pub async fn start_claude_sign_in(
 ) -> Result<SignInStarted, String> {
     // Claude subscription OAuth via claude.ai (PKCE, localhost :54545), the
     // same flow as `cli-proxy-api --claude-login` / `claude setup-token`.
+    let _signin = claim_signin_slot("claude")?;
     let pkce = crate::oauth::pkce();
     let state = crate::oauth::random_state();
     let (server, receiver) = crate::oauth::CallbackServer::new(
@@ -313,6 +316,7 @@ pub async fn start_commandcode_sign_in(
     // Web CLI-login via the Studio auth page: Studio POSTs the issued API key
     // to our localhost callback after the user signs in (or shows a "Copy
     // your API key" fallback the user can paste instead).
+    let _signin = claim_signin_slot("commandcode")?;
     let state = crate::oauth::commandcode_state();
     let (callback_url, receiver) = crate::oauth::run_commandcode_callback(state.clone()).await?;
     open_browser(&app, &crate::oauth::commandcode_auth_url(&callback_url, &state))?;
@@ -381,6 +385,34 @@ pub async fn verify_claude_key(pool: tauri::State<'_, SqlitePool>, api_key: Stri
     // its key slot and an honest empty plan (unknown means unknown).
     let _ = crate::db::register_account(&pool, "claude", &account, &account, None).await;
     Ok(ClaudeVerified { models, provider: "claude".to_string(), account })
+}
+
+/// One live browser sign-in per provider. A second click while the first
+/// callback server still waits (up to ~5 min) would otherwise fail at port
+/// bind with a cryptic error — claim a slot first and say so honestly.
+static SIGNIN_SLOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn signin_slots() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    SIGNIN_SLOTS.get_or_init(Default::default)
+}
+
+fn claim_signin_slot(provider: &str) -> Result<SigninGuard, String> {
+    let mut set = signin_slots().lock().map_err(|_| "sign-in state unavailable".to_string())?;
+    if !set.insert(provider.to_string()) {
+        return Err("sign-in already in progress — finish it in the browser window, or wait about 5 minutes and try again".to_string());
+    }
+    Ok(SigninGuard(provider.to_string()))
+}
+
+struct SigninGuard(String);
+
+impl Drop for SigninGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = signin_slots().lock() {
+            set.remove(&self.0);
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -475,6 +507,18 @@ pub fn not_configured_response(provider_slug: &str) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn signin_slot_is_single_flight_per_provider() {
+        // Unique provider name so parallel test threads never collide.
+        let tag = format!("test-slot-{}", std::process::id());
+        let first = super::claim_signin_slot(&tag);
+        assert!(first.is_ok());
+        let second = super::claim_signin_slot(&tag);
+        assert!(second.is_err(), "second concurrent sign-in must be refused");
+        drop(first);
+        assert!(super::claim_signin_slot(&tag).is_ok(), "slot releases on drop");
+    }
+
     /// The opener-plugin path hands the whole URL to the OS with no shell,
     /// so `&` query separators survive (the old `cmd /C start` spawn
     /// truncated every authorize URL at the first `&`). This pins the

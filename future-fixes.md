@@ -172,11 +172,15 @@ this one still needs them.)
 - [x] Time bounds as bound params; doc fixed.
 - [x] Skipped/failed/busy counters; first error wins.
 - [x] Terminal `[DONE]` + synthesized usage always (incl. passthrough).
-- [ ] Security hygiene (remainder): committed Antigravity secret → env-only
-  + rotate (needs provider-side rotation); `CSP:null` + `withGlobalTauri`
-  lock-down; `Host` allowlist. Done: wincred orphan sweep + target bound,
-  `id_token` dropped on persist/merge, verify-before-save gating via
-  migration 011 + candidate filter, `provider` on all-failed errors.
+- [x] Antigravity OAuth secret purged from the tree (was briefly public —
+  rotate it in Google Cloud Console); user-owned client ID + secret in the
+  vault (Settings) or env, wired through desktop exchange/refresh, adapter
+  refresh, and dev middleware; authorize URLs use the effective client.
+  Also done earlier: wincred orphan sweep + target bound, `id_token`
+  dropped on persist/merge, verify-before-save gating via migration 011 +
+  candidate filter, `provider` on all-failed errors.
+  Remainder: committed-secret rotation is a user action; `CSP:null` +
+  `withGlobalTauri` lock-down; `Host` allowlist.
 
 ## 5. Missing — things to add
 

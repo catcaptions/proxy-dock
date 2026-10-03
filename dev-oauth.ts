@@ -23,6 +23,12 @@ const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo?alt=json";
 // Same public client the Tauri backend uses (mirrors the agy CLI flow).
 const ANTIGRAVITY_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+// User-owned override via PROXYDOCK_ANTIGRAVITY_CLIENT_ID (else the default).
+function antigravityClientId(): string {
+  const raw =
+    process.env.PROXYDOCK_ANTIGRAVITY_CLIENT_ID ?? process.env.PROXYHUB_ANTIGRAVITY_CLIENT_ID ?? "";
+  return raw.trim() || ANTIGRAVITY_CLIENT_ID;
+}
 // No shipped default — set PROXYDOCK_ANTIGRAVITY_SECRET (dev) or paste it in
 // Settings (desktop vault). Endpoints below 500 tersely when it is absent.
 function antigravityClientSecret(): string | null {
@@ -184,6 +190,12 @@ export function proxyDockDevOAuth(): Plugin {
           sendJson(res, 200, { codexPort: loopbackStatus.codexPort, antigravityPort: loopbackStatus.antigravityPort, claudePort: loopbackStatus.claudePort });
           return;
         }
+
+        // --- Effective Antigravity client ID (env override or default).
+        if (url.pathname === "/__proxydock/antigravity-client" && req.method === "GET") {
+          sendJson(res, 200, { client_id: antigravityClientId() });
+          return;
+        }
         if (url.pathname === "/__proxydock/oauth-pending" && req.method === "GET") {
           const provider = url.searchParams.get("provider") ?? "";
           const state = url.searchParams.get("state") ?? "";
@@ -257,7 +269,7 @@ export function proxyDockDevOAuth(): Plugin {
               headers: { "Content-Type": "application/x-www-form-urlencoded" },
               body: new URLSearchParams({
                 code: body.code,
-                client_id: ANTIGRAVITY_CLIENT_ID,
+                client_id: antigravityClientId(),
                 client_secret: exchangeSecret,
                 redirect_uri: body.redirect_uri,
                 grant_type: "authorization_code",
@@ -532,7 +544,7 @@ export function proxyDockDevOAuth(): Plugin {
               headers: { "Content-Type": "application/x-www-form-urlencoded" },
               body: new URLSearchParams({
                 refresh_token: body.refresh_token,
-                client_id: ANTIGRAVITY_CLIENT_ID,
+                client_id: antigravityClientId(),
                 client_secret: refreshSecret,
                 grant_type: "refresh_token",
               }),

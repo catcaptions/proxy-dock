@@ -399,7 +399,9 @@ export default function ProviderPage({ slug, provider }: Props) {
         // Cancel leaves quietly (parity with the preview path); timeout and
         // Rust errors surface honestly.
         if (controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : "Browser sign-in failed.");
+        // Tauri IPC rejections arrive as plain strings (the Rust error text),
+        // not Error instances — surface them instead of a generic fallback.
+        setError(typeof err === "string" && err.trim() ? err : err instanceof Error ? err.message : "Browser sign-in failed.");
       })
       .finally(() => {
         setSigningIn(false);
@@ -548,7 +550,7 @@ export default function ProviderPage({ slug, provider }: Props) {
         setSignInOpen(false);
       })
       .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : "Browser sign-in failed.");
+        setError(typeof err === "string" && err.trim() ? err : err instanceof Error ? err.message : "Browser sign-in failed.");
       })
       .finally(() => {
         setSigningIn(false);

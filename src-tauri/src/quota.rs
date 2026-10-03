@@ -457,8 +457,7 @@ async fn codex_quota(
 // ---------------------------------------------------------------------------
 
 const ANTIGRAVITY_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-const ANTIGRAVITY_CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
-// NOTE: the client secret lives in oauth_secret (vault/env) — never here.
+// NOTE: client ID + secret live in oauth_secret (vault/env) — never here.
 
 const LOAD_PROJECT_URLS: [&str; 3] = [
     "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
@@ -700,13 +699,13 @@ pub(crate) struct GoogleTokenResponse {
 /// Google OAuth refresh, shared with the catalog module so a stale access
 /// token doesn't fail a catalog refresh the quota path would have saved.
 pub(crate) async fn refresh_google_token(refresh_token: &str) -> Result<GoogleTokenResponse, String> {
-    let client_secret = crate::oauth_secret::read()?;
+    let oauth = crate::oauth_secret::read()?;
     let resp = client()
         .post(ANTIGRAVITY_TOKEN_URL)
         .form(&[
             ("refresh_token", refresh_token),
-            ("client_id", ANTIGRAVITY_CLIENT_ID),
-            ("client_secret", client_secret.as_str()),
+            ("client_id", oauth.client_id.as_str()),
+            ("client_secret", oauth.client_secret.as_str()),
             ("grant_type", "refresh_token"),
         ])
         .send()

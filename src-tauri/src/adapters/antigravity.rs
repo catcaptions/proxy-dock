@@ -667,15 +667,16 @@ pub fn gemini_to_chat_completion(body: &serde_json::Value, completion_id: &str, 
 /// The client secret comes from oauth_secret (vault/env) — never hardcoded.
 pub async fn refresh_access_token(refresh_token: &str) -> Result<(String, Option<String>), String> {
     const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-    const CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
-    let client_secret = crate::oauth_secret::read()?;
+    // Effective user-owned client (vault/env). The agy CLI flow default ID
+    // lives in oauth_secret::BUILTIN_CLIENT_ID; never hardcode one here.
+    let oauth = crate::oauth_secret::read()?;
     let client = serving_client();
     let resp = client
         .post(TOKEN_URL)
         .form(&[
             ("refresh_token", refresh_token),
-            ("client_id", CLIENT_ID),
-            ("client_secret", client_secret.as_str()),
+            ("client_id", oauth.client_id.as_str()),
+            ("client_secret", oauth.client_secret.as_str()),
             ("grant_type", "refresh_token"),
         ])
         .send()

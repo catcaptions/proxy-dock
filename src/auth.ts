@@ -730,10 +730,10 @@ export function buildCodexAuthUrl(state: string, challenge: string, redirectUri:
   return `${CODEX_AUTH_URL}?${params.toString()}`;
 }
 
-export function buildAntigravityAuthUrl(state: string, redirectUri: string): string {
+export function buildAntigravityAuthUrl(state: string, redirectUri: string, clientId: string = ANTIGRAVITY_CLIENT_ID): string {
   const params = new URLSearchParams({
     access_type: "offline",
-    client_id: ANTIGRAVITY_CLIENT_ID,
+    client_id: clientId,
     prompt: "consent",
     redirect_uri: redirectUri,
     response_type: "code",
@@ -1117,14 +1117,30 @@ export async function startPreviewOAuth(slug: "chatgpt" | "antigravity" | "claud
   if (status.antigravityPort > 0) {
     const redirectUri = `http://localhost:${status.antigravityPort}${ANTIGRAVITY_CALLBACK_PATH}`;
     saveOAuthFlow(slug, { state, redirectUri });
-    const authUrl = buildAntigravityAuthUrl(state, redirectUri);
+    const authUrl = buildAntigravityAuthUrl(state, redirectUri, await effectiveAntigravityClientId());
     void openExternal(authUrl);
     return { state, authUrl, auto: true };
   }
   saveOAuthFlow(slug, { state, redirectUri: ANTIGRAVITY_CALLBACK_URL });
-  const authUrl = buildAntigravityAuthUrl(state, ANTIGRAVITY_CALLBACK_URL);
+  const authUrl = buildAntigravityAuthUrl(state, ANTIGRAVITY_CALLBACK_URL, await effectiveAntigravityClientId());
   void openExternal(authUrl);
   return { state, authUrl, auto: false };
+}
+
+/** Effective Antigravity client ID for the preview flow (dev middleware env,
+ * else the built-in public default). Desktop reads the vault bundle instead.
+ * Never throws — falls back to the built-in ID. */
+export async function effectiveAntigravityClientId(): Promise<string> {
+  try {
+    const resp = await fetch("/__proxydock/antigravity-client");
+    if (resp.ok) {
+      const data = (await resp.json().catch(() => ({}))) as { client_id?: unknown };
+      if (typeof data.client_id === "string" && data.client_id.trim()) return data.client_id.trim();
+    }
+  } catch {
+    // Preview middleware absent (production) — built-in default applies.
+  }
+  return ANTIGRAVITY_CLIENT_ID;
 }
 
 /**

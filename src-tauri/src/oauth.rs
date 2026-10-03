@@ -16,9 +16,8 @@ pub const CODEX_CALLBACK_PATH: &str = "/auth/callback";
 
 pub const ANTIGRAVITY_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub const ANTIGRAVITY_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-pub const ANTIGRAVITY_CLIENT_ID: &str =
-    "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
-// NOTE: the client secret lives in oauth_secret (vault/env) — never here.
+// NOTE: the client ID lives in oauth_secret::BUILTIN_CLIENT_ID (user bundle
+// overrides it) — never hardcode one here.
 pub const ANTIGRAVITY_CALLBACK_PORT: u16 = 51121;
 pub const ANTIGRAVITY_CALLBACK_PATH: &str = "/oauth-callback";
 pub const ANTIGRAVITY_SCOPES: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs";
@@ -132,7 +131,9 @@ pub fn antigravity_auth_url(state: &str, port: u16) -> String {
     let redirect = format!("http://localhost:{port}{ANTIGRAVITY_CALLBACK_PATH}");
     let mut params = url::form_urlencoded::Serializer::new(String::new());
     params.append_pair("access_type", "offline");
-    params.append_pair("client_id", ANTIGRAVITY_CLIENT_ID);
+    // Effective (user-owned) client: the code must belong to the same
+    // client the exchange uses, or Google rejects it.
+    params.append_pair("client_id", &crate::oauth_secret::client_id());
     params.append_pair("prompt", "consent");
     params.append_pair("redirect_uri", &redirect);
     params.append_pair("response_type", "code");
@@ -555,11 +556,11 @@ pub async fn exchange_codex(code: &str, verifier: &str, port: u16) -> Result<Sto
 
 pub async fn exchange_antigravity(code: &str, port: u16) -> Result<StoredCredential, String> {
     let redirect = format!("http://localhost:{port}{ANTIGRAVITY_CALLBACK_PATH}");
-    let client_secret = crate::oauth_secret::read()?;
+    let oauth = crate::oauth_secret::read()?;
     let params = [
         ("code", code.to_string()),
-        ("client_id", ANTIGRAVITY_CLIENT_ID.to_string()),
-        ("client_secret", client_secret),
+        ("client_id", oauth.client_id),
+        ("client_secret", oauth.client_secret),
         ("redirect_uri", redirect),
         ("grant_type", "authorization_code".to_string()),
     ];
