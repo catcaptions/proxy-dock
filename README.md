@@ -10,9 +10,11 @@ Proxy Dock puts your AI subscriptions (ChatGPT, OpenCode, Command Code, Antigrav
 
 ## Install
 
-No published downloads yet — build it (one command per OS below). All builds are unsigned: Windows SmartScreen will warn, macOS Gatekeeper needs right-click → Open on first launch. Signing is planned.
+Download installers from [Releases](https://github.com/catcaptions/proxy-dock/releases). Latest is [v0.1.0](https://github.com/catcaptions/proxy-dock/releases/tag/v0.1.0) with the Windows x64 installer ([`Proxy.Dock_0.1.0_x64-setup.exe`](https://github.com/catcaptions/proxy-dock/releases/download/v0.1.0/Proxy.Dock_0.1.0_x64-setup.exe)). macOS / Linux have no published builds yet — build from source below.
 
-Prerequisites everywhere: [Node](https://nodejs.org) 20+, [Rust](https://rustup.rs) stable, and `npm install` in the repo. Then pick your OS.
+All builds are unsigned: Windows SmartScreen will warn, macOS Gatekeeper needs right-click → Open on first launch. Signing is planned.
+
+Or build from source — prerequisites everywhere: [Node](https://nodejs.org) 20+, [Rust](https://rustup.rs) stable, and `npm install` in the repo. Then pick your OS.
 
 ### Windows
 
